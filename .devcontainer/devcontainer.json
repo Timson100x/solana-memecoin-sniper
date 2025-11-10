@@ -20,7 +20,8 @@
                 "tamasfe.even-better-toml",
                 "ms-vscode-remote.remote-containers",
                 "github.vscode-github-actions",
-                "esbenp.prettier-vscode"
+                "esbenp.prettier-vscode",
+                "Continue.continue"
             ]
         }
     },
