@@ -21,8 +21,7 @@
                 "ms-vscode-remote.remote-containers",
                 "github.vscode-github-actions",
                 "esbenp.prettier-vscode",
-                "Continue.continue"
-            ]
+                "Continue.continue"            ]
         }
     },
     "remoteUser": "vscode",
