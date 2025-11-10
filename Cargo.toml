@@ -1,6 +1,6 @@
 [package]
 name = "solana-sniper-bot"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
@@ -11,3 +11,10 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 reqwest = { version = "0.11", features = ["json"] }
 anyhow = "1.0"
+tonic = "0.10" # Yellowstone gRPC
+prost = "0.12" # Protocol Buffers for Yellowstone gRPC
+jito-searcher-client = "0.4" # Jito bundles
+futures = "0.3" # for async RPC rotation
+
+# Für Pump.fun-API
+url = "2.2"
