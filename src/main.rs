@@ -1,6 +1,4 @@
 use anyhow::Result;
-use dashmap::DashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
 use tokio::signal;
 use tracing::{error, info};
@@ -11,7 +9,7 @@ mod risk;
 mod scoring;
 mod types;
 
-use types::{AppState, AppSharedState, RiskManager};
+use types::{AppState, AppSharedState};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -19,57 +17,51 @@ async fn main() -> Result<()> {
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .or_else(|_| "info,pump_runner_bot=debug".parse()),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,pump_runner_bot=debug".parse().unwrap()),
         )
+        .with_target(false)
         .init();
 
-    info!("Starting Pump Runner Bot v0.3.0...");
+    let live = std::env::var("ENABLE_LIVE_TRADING").unwrap_or_default() == "true";
+    info!("pump_runner_bot v0.3.0 starting");
+    info!(
+        "Features: real volume | RugShield | CircuitBreaker | Jito | Watchlist cleanup | Trade log"
+    );
+    info!(
+        "Live trading: {}",
+        if live { "ENABLED" } else { "DISABLED (dry-run)" }
+    );
 
-    let live_trading_env = std::env::var("ENABLE_LIVE_TRADING")
-        .unwrap_or_else(|_| "false".to_string())
-        .parse()
-        .unwrap_or(false);
+    let state: AppSharedState = Arc::new(AppState::new(live));
 
-    let max_loss_sol: f64 = std::env::var("MAX_DAILY_LOSS_SOL")
-        .unwrap_or_else(|_| "0.5".to_string())
-        .parse()
-        .unwrap_or(0.5);
-
-    let max_loss_lamports = (max_loss_sol * 1_000_000_000.0) as u64;
-    let max_concentration: f64 = std::env::var("MAX_TOP10_HOLDER_CONCENTRATION")
-        .unwrap_or_else(|_| "0.45".to_string())
-        .parse()
-        .unwrap_or(0.45);
-
-    let state: AppSharedState = Arc::new(AppState {
-        watchlist: DashMap::new(),
-        risk_manager: RiskManager {
-            live_trading_enabled: AtomicBool::new(live_trading_env),
-            daily_loss_lamports: AtomicU64::new(0),
-            max_daily_loss_lamports: max_loss_lamports,
-            max_top10_concentration: max_concentration,
-        },
-    });
-
-    let state_grad = state.clone();
-    tokio::spawn(async move {
-        if let Err(e) = helius::listen_graduations(state_grad).await {
-            error!("Fataler Fehler im Graduation Listener: {:?}", e);
+    let state_ws = state.clone();
+    let ws_handle = tokio::spawn(async move {
+        if let Err(e) = helius::listen_graduations(state_ws).await {
+            error!("WebSocket fatal: {:?}", e);
         }
     });
 
     let state_scan = state.clone();
-    tokio::spawn(async move {
+    let scan_handle = tokio::spawn(async move {
         if let Err(e) = helius::scan_volume_and_score(state_scan).await {
-            error!("Fataler Fehler im Volume Scanner: {:?}", e);
+            error!("Scanner fatal: {:?}", e);
         }
     });
 
-    info!("Bot v0.3.0 aktiv. Ueberwache Graduationen, Risiken & High-Momentum Runner...");
+    info!("Bot running. Ctrl+C to stop.");
 
     signal::ctrl_c().await?;
-    info!("Shutdown Signal empfangen. Beende Bot sauber...");
+    info!("Shutdown signal received");
 
+    ws_handle.abort();
+    scan_handle.abort();
+
+    info!(
+        "Final daily PnL: {:.4} SOL | Open positions: {}",
+        state.risk.daily_pnl(),
+        state.risk.open_positions.lock().len()
+    );
+    info!("pump_runner_bot stopped");
     Ok(())
 }

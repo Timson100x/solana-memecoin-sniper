@@ -5,160 +5,306 @@ use serde_json::json;
 use std::time::Duration;
 use tokio::time::sleep;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
+use crate::risk::{check_circuit_breaker, check_rug_shield, log_trade, register_position};
 use crate::scoring::calculate_score;
-use crate::types::{AppSharedState, GraduatedToken};
+use crate::types::{AppSharedState, GraduatedToken, TradeLogEntry};
 
-const PUMP_PROGRAM_ID: &str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
+const PUMP_FUN_PROGRAM: &str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
+const PUMPSWAP_PROGRAM: &str = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA";
+const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
 
 pub async fn listen_graduations(state: AppSharedState) -> Result<()> {
-    let ws_url = std::env::var("HELIUS_WS_URL")
-        .context("HELIUS_WS_URL muss in .env gesetzt sein")?;
+    let ws_url =
+        std::env::var("HELIUS_WS_URL").context("HELIUS_WS_URL muss in .env gesetzt sein")?;
+    let mut reconnect_delay = Duration::from_secs(2);
 
     loop {
-        info!("Verbinde mit Helius WebSocket fuer Graduation-Events...");
-
-        let (mut ws_stream, _) = match connect_async(&ws_url).await {
-            Ok(val) => val,
+        info!("Verbinde mit Helius WebSocket...");
+        match run_ws_session(&ws_url, state.clone()).await {
+            Ok(_) => {
+                warn!("WS Session ended. Reconnect...");
+                reconnect_delay = Duration::from_secs(2);
+            }
             Err(e) => {
-                error!("Fehler bei Verbindung zu Helius WS: {:?}. Reconnect in 5s...", e);
-                sleep(Duration::from_secs(5)).await;
-                continue;
-            }
-        };
-
-        info!("Erfolgreich mit Helius WebSocket verbunden. Abonniere Pump.fun Program...");
-
-        let subscribe_msg = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "transactionSubscribe",
-            "params": [
-                {
-                    "accountInclude": [PUMP_PROGRAM_ID]
-                },
-                {
-                    "commitment": "processed",
-                    "encoding": "jsonParsed",
-                    "maxSupportedTransactionVersion": 0
-                }
-            ]
-        });
-
-        if let Err(e) = ws_stream.send(Message::Text(subscribe_msg.to_string())).await {
-            error!("Fehler beim Senden des Subscription-Payloads: {:?}", e);
-            sleep(Duration::from_secs(3)).await;
-            continue;
-        }
-
-        while let Some(msg) = ws_stream.next().await {
-            match msg {
-                Ok(Message::Text(text)) => {
-                    if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&text) {
-                        if let Some(mint) = extract_graduation_mint(&json_val) {
-                            if !state.watchlist.contains_key(&mint) {
-                                info!("Neuer graduierter Token erkannt: {}", mint);
-                                let entry = GraduatedToken {
-                                    mint: mint.clone(),
-                                    pool: None,
-                                    graduated_at: Utc::now(),
-                                    last_volume_5m: 0.0,
-                                    last_volume_1m: 0.0,
-                                    last_buy_ratio: 0.0,
-                                    score: 0.0,
-                                    last_updated: Utc::now(),
-                                };
-                                state.watchlist.insert(mint, entry);
-                            }
-                        }
-                    }
-                }
-                Ok(Message::Close(_)) => {
-                    warn!("WebSocket-Verbindung vom Server geschlossen. Reconnecting...");
-                    break;
-                }
-                Err(e) => {
-                    error!("WebSocket Fehler: {:?}. Reconnecting...", e);
-                    break;
-                }
-                _ => {}
+                error!("WS Error: {:?}. Reconnect in {:?}", e, reconnect_delay);
+                sleep(reconnect_delay).await;
+                reconnect_delay = (reconnect_delay * 2).min(Duration::from_secs(60));
             }
         }
-
-        sleep(Duration::from_secs(3)).await;
     }
 }
 
-fn extract_graduation_mint(tx_json: &serde_json::Value) -> Option<String> {
-    let logs = tx_json.pointer("/params/result/value/transaction/meta/logMessages")?.as_array()?;
+async fn run_ws_session(ws_url: &str, state: AppSharedState) -> Result<()> {
+    let (ws_stream, _) = connect_async(ws_url)
+        .await
+        .context("Helius WS connect failed")?;
+    let (mut write, mut read) = ws_stream.split();
 
-    let is_graduation = logs.iter().any(|log| {
-        let s = log.as_str().unwrap_or("");
-        s.contains("Instruction: InitializeMint2") || s.contains("complete")
+    let subscribe_msg = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "transactionSubscribe",
+        "params": [
+            {
+                "accountInclude": [PUMP_FUN_PROGRAM, PUMPSWAP_PROGRAM],
+                "failed": false,
+                "vote": false
+            },
+            {
+                "commitment": "confirmed",
+                "encoding": "jsonParsed",
+                "transactionDetails": "full",
+                "showRewards": false,
+                "maxSupportedTransactionVersion": 0
+            }
+        ]
     });
 
-    if is_graduation {
-        let account_keys = tx_json.pointer("/params/result/value/transaction/transaction/message/accountKeys")?.as_array()?;
-        if let Some(first_key) = account_keys.first() {
-            return first_key["pubkey"].as_str().map(|s| s.to_string());
+    write
+        .send(Message::Text(subscribe_msg.to_string()))
+        .await
+        .context("Failed to send subscription")?;
+    info!("Subscribed to Pump.fun + PumpSwap");
+
+    while let Some(msg) = read.next().await {
+        let msg = msg.context("WS receive error")?;
+        match msg {
+            Message::Text(text) => {
+                if let Err(e) = handle_message(&text, &state).await {
+                    debug!("handle_message: {:?}", e);
+                }
+            }
+            Message::Ping(data) => {
+                let _ = write.send(Message::Pong(data)).await;
+            }
+            Message::Close(_) => {
+                warn!("Close frame");
+                break;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+async fn handle_message(text: &str, state: &AppSharedState) -> Result<()> {
+    let json_val: serde_json::Value = serde_json::from_str(text)?;
+    if json_val.get("method").and_then(|m| m.as_str()) != Some("transactionNotification") {
+        return Ok(());
+    }
+
+    if let Some(mint) = extract_graduation_mint(&json_val) {
+        if !state.watchlist.contains_key(&mint) {
+            let max_size: usize = std::env::var("MAX_WATCHLIST_SIZE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(500);
+            if state.watchlist.len() >= max_size {
+                warn!("Watchlist full ({}), skipping {}", max_size, mint);
+            } else {
+                info!("NEW GRADUATED TOKEN: {}", mint);
+                state
+                    .watchlist
+                    .insert(mint.clone(), GraduatedToken::new(mint, None));
+            }
         }
     }
 
+    if let Some((mint, sol_amount, is_buy)) = extract_swap_info(&json_val) {
+        if let Some(mut entry) = state.watchlist.get_mut(&mint) {
+            entry.push_swap(sol_amount, is_buy);
+        }
+    }
+
+    Ok(())
+}
+
+fn extract_graduation_mint(tx_json: &serde_json::Value) -> Option<String> {
+    let logs = tx_json
+        .pointer("/params/result/transaction/meta/logMessages")?
+        .as_array()?;
+    let is_migrate = logs.iter().any(|log| {
+        let s = log.as_str().unwrap_or("").to_lowercase();
+        s.contains("migrate") || s.contains("graduat") || s.contains("complete")
+    });
+    if !is_migrate {
+        return None;
+    }
+    if let Some(balances) = tx_json.pointer("/params/result/transaction/meta/postTokenBalances") {
+        if let Some(arr) = balances.as_array() {
+            for bal in arr {
+                if let Some(mint) = bal.get("mint").and_then(|m| m.as_str()) {
+                    if mint != WSOL_MINT && mint.len() >= 32 {
+                        return Some(mint.to_string());
+                    }
+                }
+            }
+        }
+    }
     None
+}
+
+fn extract_swap_info(tx_json: &serde_json::Value) -> Option<(String, f64, bool)> {
+    let meta = tx_json.pointer("/params/result/transaction/meta")?;
+    let pre = meta.get("preTokenBalances")?.as_array()?;
+    let post = meta.get("postTokenBalances")?.as_array()?;
+    let mut sol_delta = 0.0_f64;
+    let mut token_mint: Option<String> = None;
+
+    for (pre_bal, post_bal) in pre.iter().zip(post.iter()) {
+        let mint = post_bal.get("mint")?.as_str()?;
+        let pre_amt = pre_bal
+            .pointer("/uiTokenAmount/uiAmount")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let post_amt = post_bal
+            .pointer("/uiTokenAmount/uiAmount")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let delta = post_amt - pre_amt;
+        if mint == WSOL_MINT {
+            sol_delta += delta;
+        } else if mint.len() >= 32 {
+            token_mint = Some(mint.to_string());
+        }
+    }
+
+    let mint = token_mint?;
+    if sol_delta.abs() < 0.0001 {
+        return None;
+    }
+    let is_buy = sol_delta < 0.0;
+    Some((mint, sol_delta.abs(), is_buy))
 }
 
 pub async fn scan_volume_and_score(state: AppSharedState) -> Result<()> {
     let scan_interval: u64 = std::env::var("SCAN_INTERVAL_SECS")
-        .unwrap_or_else(|_| "6".to_string())
-        .parse()
+        .ok()
+        .and_then(|v| v.parse().ok())
         .unwrap_or(6);
-
     let threshold: f64 = std::env::var("SCORE_THRESHOLD")
-        .unwrap_or_else(|_| "70.0".to_string())
-        .parse()
+        .ok()
+        .and_then(|v| v.parse().ok())
         .unwrap_or(70.0);
+    let min_vol: f64 = std::env::var("MIN_VOLUME_5M_SOL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(15.0);
+    let inactive_mins: f64 = std::env::var("INACTIVE_TIMEOUT_MINS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(15.0);
+    let min_score_keep: f64 = std::env::var("MIN_SCORE_TO_KEEP")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10.0);
+
+    info!(
+        "Scanner started | interval={}s | threshold={} | cleanup inactive>{}m",
+        scan_interval, threshold, inactive_mins
+    );
 
     loop {
         sleep(Duration::from_secs(scan_interval)).await;
 
-        let now = Utc::now();
+        let to_remove: Vec<String> = state
+            .watchlist
+            .iter()
+            .filter(|e| {
+                let t = e.value();
+                t.minutes_since_last_swap() > inactive_mins || t.score < min_score_keep
+            })
+            .map(|e| e.key().clone())
+            .collect();
+        for mint in &to_remove {
+            state.watchlist.remove(mint);
+            debug!("Removed inactive/low-score token {}", mint);
+        }
 
-        state.watchlist.retain(|_, entry| {
-            let inactive_duration = (now - entry.last_updated).num_minutes();
-            inactive_duration < 15 && entry.score >= 10.0
-        });
-
-        for mut entry in state.watchlist.iter_mut() {
-            let mint = entry.key().clone();
-            let (vol_5m, vol_1m, buy_ratio) = simulate_market_data(&mint, now.timestamp());
-
-            let age_hours = (now - entry.graduated_at).num_seconds() as f64 / 3600.0;
-            let score = calculate_score(vol_5m, vol_1m, buy_ratio, age_hours);
-
-            entry.last_volume_5m = vol_5m;
-            entry.last_volume_1m = vol_1m;
-            entry.last_buy_ratio = buy_ratio;
-            entry.score = score;
-            entry.last_updated = now;
-
-            if score >= threshold {
-                info!(
-                    "HIGH SCORE SIGNAL | Mint: {} | Score: {:.1} | 5m Vol: {:.1} SOL | BuyRatio: {:.0}%",
-                    mint, score, vol_5m, buy_ratio * 100.0
+        let keys: Vec<String> = state.watchlist.iter().map(|e| e.key().clone()).collect();
+        for mint in keys {
+            if let Some(mut entry) = state.watchlist.get_mut(&mint) {
+                entry.recalculate_metrics();
+                let age = entry.age_hours();
+                let score = calculate_score(
+                    entry.last_volume_5m,
+                    entry.last_volume_1m,
+                    entry.last_buy_ratio,
+                    age,
                 );
+                entry.score = score;
+                if score >= threshold && entry.last_volume_5m >= min_vol {
+                    info!(
+                        "HIGH SCORE | mint={} | score={:.1} | vol5m={:.1} | buy={:.0}% | age={:.1}h",
+                        mint, score, entry.last_volume_5m, entry.last_buy_ratio * 100.0, age
+                    );
+
+                    if !check_circuit_breaker(&state) {
+                        log_trade(&TradeLogEntry {
+                            timestamp: Utc::now(),
+                            action: "SKIP_CIRCUIT".into(),
+                            mint: mint.clone(),
+                            score,
+                            sol_amount: 0.0,
+                            signature: None,
+                            reason: Some("daily loss limit".into()),
+                        });
+                        continue;
+                    }
+
+                    match check_rug_shield(&mint).await {
+                        Ok(true) => {
+                            if state.risk.is_live() {
+                                match crate::jupiter::try_buy_token(&mint).await {
+                                    Ok(sig) => {
+                                        let sol = std::env::var("BUY_AMOUNT_SOL")
+                                            .ok()
+                                            .and_then(|v| v.parse().ok())
+                                            .unwrap_or(0.05);
+                                        register_position(&state, &mint, sol, 0.0);
+                                        log_trade(&TradeLogEntry {
+                                            timestamp: Utc::now(),
+                                            action: "BUY".into(),
+                                            mint: mint.clone(),
+                                            score,
+                                            sol_amount: sol,
+                                            signature: Some(sig),
+                                            reason: None,
+                                        });
+                                    }
+                                    Err(e) => error!("Buy failed {}: {:?}", mint, e),
+                                }
+                            } else {
+                                log_trade(&TradeLogEntry {
+                                    timestamp: Utc::now(),
+                                    action: "DRY_RUN".into(),
+                                    mint: mint.clone(),
+                                    score,
+                                    sol_amount: 0.0,
+                                    signature: None,
+                                    reason: Some("live trading disabled".into()),
+                                });
+                                info!("DRY-RUN would buy {}", mint);
+                            }
+                        }
+                        Ok(false) => {
+                            log_trade(&TradeLogEntry {
+                                timestamp: Utc::now(),
+                                action: "SKIP_RUG".into(),
+                                mint: mint.clone(),
+                                score,
+                                sol_amount: 0.0,
+                                signature: None,
+                                reason: Some("top10 holder concentration".into()),
+                            });
+                            warn!("RugShield blocked {}", mint);
+                        }
+                        Err(e) => warn!("RugShield error for {}: {:?}", mint, e),
+                    }
+                }
             }
         }
     }
-}
-
-fn simulate_market_data(mint: &str, timestamp: i64) -> (f64, f64, f64) {
-    let hash = mint.bytes().fold(0u64, |acc, b| acc.wrapping_add(b as u64));
-    let seed = hash.wrapping_add((timestamp / 6) as u64);
-
-    let vol_5m = ((seed % 100) as f64) + 5.0;
-    let vol_1m = vol_5m * (((seed % 40) as f64 + 10.0) / 100.0);
-    let buy_ratio = 0.50 + (((seed % 45) as f64) / 100.0);
-
-    (vol_5m, vol_1m, buy_ratio)
 }
