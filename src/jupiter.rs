@@ -84,4 +84,3 @@ impl JupiterClient {
         Ok("LIVE_TX_SIGNATURE_SUCCESS".to_string())
     }
 }
-" filePath="/workspace/app/src/jupiter.rs

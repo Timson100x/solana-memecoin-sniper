@@ -2,6 +2,7 @@
 name = "pump_runner_bot"
 version = "0.3.0"
 edition = "2021"
+description = "Production-ready Solana PumpSwap runner bot – Helius + Jupiter + Jito + Risk Management"
 
 [dependencies]
 tokio = { version = "1.38", features = ["full"] }
@@ -21,3 +22,7 @@ base64 = "0.22"
 bs58 = "0.5"
 solana-sdk = "2.1"
 solana-client = "2.1"
+bincode = "1.3"
+thiserror = "1.0"
+parking_lot = "0.12"
+uuid = { version = "1", features = ["v4"] }

@@ -162,4 +162,3 @@ fn simulate_market_data(mint: &str, timestamp: i64) -> (f64, f64, f64) {
 
     (vol_5m, vol_1m, buy_ratio)
 }
-" filePath="/workspace/app/src/helius.rs
