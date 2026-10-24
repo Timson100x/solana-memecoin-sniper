@@ -62,5 +62,5 @@ pub fn calculate_score(
         score, volume_5m_sol, volume_1m_sol, buy_ratio, age_hours
     );
 
-    score.clamp(0.0, 100.0)
+    score.clamp(0.0_f64, 100.0_f64)
 }

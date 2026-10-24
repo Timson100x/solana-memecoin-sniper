@@ -129,8 +129,8 @@ impl JupiterClient {
 
         let recent_blockhash = self.rpc.get_latest_blockhash().await?;
         versioned_tx.message.set_recent_blockhash(recent_blockhash);
-        versioned_tx.sign(&[keypair], recent_blockhash);
-
+        let versioned_tx = VersionedTransaction::try_new(versioned_tx.message.clone(), &[&keypair])
+            .context("sign tx")?;
         let use_jito = env::var("USE_JITO").unwrap_or_else(|_| "true".to_string()) == "true";
         if use_jito {
             match self.send_jito_bundle(&versioned_tx, keypair).await {
