@@ -1,89 +1,76 @@
-use solana_client::rpc_client::RpcClient;
-use solana_sdk::commitment_config::CommitmentConfig;
-use tokio;
-use tonic::transport::Channel;
-use jito_searcher_client::prelude::*;
-use futures::stream::*;
-use url::Url;
+use anyhow::Result;
+use dashmap::DashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::Arc;
+use tokio::signal;
+use tracing::{error, info};
 
-// KONFIGURATION: Verschiedene freie RPC-Endpunkte rotieren
-const RPC_URLS: &[&str] = &[
-    "https://api.devnet.solana.com",
-    "https://rpc.helius.xyz/?api-key=YOUR_HELIUS_API_KEY",
-    "https://solana-mainnet.rpc.extrnode.com",
-    "https://rpc.quicknode.com"
-];
+mod helius;
+mod jupiter;
+mod risk;
+mod scoring;
+mod types;
 
-// Dummy gRPC Client für Yellowstone
-async fn connect_yellowstone() -> Result<Channel, tonic::transport::Error> {
-    Channel::from_static("https://mainnet-api.yellowstone.io")
-        .connect()
-        .await
-}
-
-// Jito Bundle Submission (Demo)
-async fn submit_jito_bundle() -> Result<(), Box<dyn std::error::Error>> {
-    // Demo-Client erzeugen (Details je nach Jito Searcher API)
-    // Jito-Bundles logic hier ergänzen
-    Ok(())
-}
-
-// Pump.fun Monitoring (Demo)
-async fn monitor_pump_fun() -> Result<(), Box<dyn std::error::Error>> {
-    let api_url = Url::parse("https://pump.fun/api/tokens").unwrap();
-    let resp = reqwest::get(api_url.as_str()).await?;
-    let body = resp.text().await?;
-    println!("🔍 Pump.fun Tokens: {}", body);
-    Ok(())
-}
-
-// Rotierende RPC-Auswahl
-dyn rpc_selector() -> &'static str {
-    let idx = chrono::Utc::now().timestamp() as usize % RPC_URLS.len();
-    RPC_URLS[idx]
-}
+use types::{AppState, AppSharedState, RiskManager};
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    println!("🚀 Solana Memecoin Sniper Bot mit ALLEN FEATURES gestartet!");
-    let rpc_url = rpc_selector();
-    println!("📡 RPC: {}", rpc_url);
-    let client = RpcClient::new_with_commitment(rpc_url.to_string(), CommitmentConfig::confirmed());
+async fn main() -> Result<()> {
+    dotenvy::dotenv().ok();
 
-    match client.get_latest_blockhash() {
-        Ok(blockhash) => println!("✅ RPC-Connect: {}", blockhash),
-        Err(e) => println!("❌ Fehler beim RPC-Connect: {:?}", e),
-    }
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .or_else(|_| "info,pump_runner_bot=debug".parse()),
+        )
+        .init();
 
-    // Yellowstone-gRPC Connect
-    match connect_yellowstone().await {
-        Ok(_) => println!("🔗 Yellowstone gRPC ready!"),
-        Err(e) => println!("🔗 Yellowstone Fehler: {:?}", e),
-    }
+    info!("Starting Pump Runner Bot v0.3.0...");
 
-    // Pump.fun Monitoring
-    let _ = monitor_pump_fun().await;
-    // Jito Bundles
-    let _ = submit_jito_bundle().await;
+    let live_trading_env = std::env::var("ENABLE_LIVE_TRADING")
+        .unwrap_or_else(|_| "false".to_string())
+        .parse()
+        .unwrap_or(false);
 
-    // Endloser Perform-Sleep zur Demo
-    loop {
-        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-        println!("⏳ Scan läuft ...");
-    }
+    let max_loss_sol: f64 = std::env::var("MAX_DAILY_LOSS_SOL")
+        .unwrap_or_else(|_| "0.5".to_string())
+        .parse()
+        .unwrap_or(0.5);
+
+    let max_loss_lamports = (max_loss_sol * 1_000_000_000.0) as u64;
+    let max_concentration: f64 = std::env::var("MAX_TOP10_HOLDER_CONCENTRATION")
+        .unwrap_or_else(|_| "0.45".to_string())
+        .parse()
+        .unwrap_or(0.45);
+
+    let state: AppSharedState = Arc::new(AppState {
+        watchlist: DashMap::new(),
+        risk_manager: RiskManager {
+            live_trading_enabled: AtomicBool::new(live_trading_env),
+            daily_loss_lamports: AtomicU64::new(0),
+            max_daily_loss_lamports: max_loss_lamports,
+            max_top10_concentration: max_concentration,
+        },
+    });
+
+    let state_grad = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = helius::listen_graduations(state_grad).await {
+            error!("Fataler Fehler im Graduation Listener: {:?}", e);
+        }
+    });
+
+    let state_scan = state.clone();
+    tokio::spawn(async move {
+        if let Err(e) = helius::scan_volume_and_score(state_scan).await {
+            error!("Fataler Fehler im Volume Scanner: {:?}", e);
+        }
+    });
+
+    info!("Bot v0.3.0 aktiv. Ueberwache Graduationen, Risiken & High-Momentum Runner...");
+
+    signal::ctrl_c().await?;
+    info!("Shutdown Signal empfangen. Beende Bot sauber...");
+
+    Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[tokio::test]
-    async fn test_rpc_rotation() {
-        let url = rpc_selector();
-        let client = RpcClient::new(url.to_string());
-        assert!(client.get_latest_blockhash().is_ok());
-    }
-    #[tokio::test]
-    async fn test_yellowstone_connect() {
-        assert!(connect_yellowstone().await.is_ok());
-    }
-}
+" filePath="/workspace/app/src/main.rs
