@@ -72,5 +72,4 @@ async fn main() -> Result<()> {
     info!("Shutdown Signal empfangen. Beende Bot sauber...");
 
     Ok(())
-}
-" filePath="/workspace/app/src/main.rs
+}"
