@@ -72,4 +72,4 @@ async fn main() -> Result<()> {
     info!("Shutdown Signal empfangen. Beende Bot sauber...");
 
     Ok(())
-}"
+}
