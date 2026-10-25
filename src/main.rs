@@ -49,10 +49,13 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match &cli.env_file {
-        Some(p) => dotenvy::from_path(p).ok(),
-        None => dotenvy::dotenv().ok(),
+        Some(p) => {
+            dotenvy::from_path(p).ok();
+        }
+        None => {
+            dotenvy::dotenv().ok();
+        }
     }
-    .ok();
 
     init_logging();
 
