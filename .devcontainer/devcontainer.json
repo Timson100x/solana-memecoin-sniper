@@ -1,32 +1,43 @@
 {
-    "name": "Solana Memecoin Bot Dev (Rust + Anchor)",
-    "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
-    "features": {
-        "ghcr.io/devcontainers/features/rust:1": {
-            "version": "latest"
-        },
-        "ghcr.io/devcontainers/features/node:1": {
-            "version": "20"
-        },
-        "ghcr.io/devcontainers/features/git:1": {},
-        "ghcr.io/devcontainers/features/github-cli:1": {}
+  "name": "solana-trading-bot",
+  "image": "mcr.microsoft.com/devcontainers/rust:1.82-bookworm",
+  "runArgs": ["--cap-add=SYS_PTRACE", "--security-opt", "seccomp=unconfined"],
+  "postCreateCommand": "bash scripts/bootstrap.sh",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "vadimcn.vscode-lldb",
+        "tauri-apps.basedpng",
+        "tamasfe.even-better-toml",
+        "editorconfig.editorconfig",
+        "github.vscode-github-actions"
+      ]
+    }
+  },
+  "features": {
+    "recommendCli": "true"
+  },
+  "hostRequirements": {
+    "cpus": 4
+  },
+  "recommendedSecrets": {
+    "HELIUS_API_KEY": {
+      "description": "Helius API key for RPC/WebSocket access"
     },
-    "postCreateCommand": "sudo apt-get update && sudo apt-get install -y build-essential pkg-config libssl-dev libclang-dev && . ~/.bashrc && sh -c \"$(curl -sSfL https://release.solana.com/v1.18.22/install)\" && export PATH=\"$HOME/.local/share/solana/install/active_release/bin:$PATH\" && cargo install --git https://github.com/coral-xyz/anchor avm --locked --force && avm install latest && avm use latest && echo 'export PATH=\"$HOME/.local/share/solana/install/active_release/bin:$PATH\"' >> ~/.bashrc && echo 'source ~/.cargo/env' >> ~/.bashrc",
-    "customizations": {
-        "vscode": {
-            "extensions": [
-                "rust-lang.rust-analyzer",
-                "solana-labs.solana",
-                "tamasfe.even-better-toml",
-                "ms-vscode-remote.remote-containers",
-                "github.vscode-github-actions",
-                "esbenp.prettier-vscode",
-                "Continue.continue"            ]
-        }
+    "HELIUS_RPC_URL": { "description": "Helius mainnet RPC URL" },
+    "HELIUS_WS_URL": { "description": "Helius mainnet WebSocket URL" },
+    "JUPITER_API_KEY": { "description": "Jupiter API key (optional)" },
+    "SOLANA_WALLET_PRIVATE_KEY": {
+      "description": "Base58 Solana private key (leave empty for paper trading)"
     },
-    "remoteUser": "vscode",
-    "mounts": [
-        "source=${localWorkspaceFolder}/target,target=/workspaces/${localWorkspaceFolderBasename}/target,type=bind,consistency=cached"
-    ],
-    "forwardPorts": [8899, 3000]
+    "TELEGRAM_BOT_TOKEN": { "description": "Telegram bot token (optional)" },
+    "TELEGRAM_CHAT_ID": { "description": "Telegram chat id (optional)" }
+  },
+  "remoteUser": "vscode",
+  "mounts": [
+    "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
+  ],
+  "onCreateCommand": "apt-get update && apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev clang cmake protobuf-compiler git curl jq unzip",
+  "updateHostRequirements": []
 }

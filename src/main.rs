@@ -1,67 +1,100 @@
-use anyhow::Result;
-use std::sync::Arc;
-use tokio::signal;
-use tracing::{error, info};
+use std::path::PathBuf;
 
-mod helius;
-mod jupiter;
+use anyhow::{Context, Result};
+use clap::Parser;
+use tracing::{error, info, warn};
+
+mod config;
+mod execution;
+mod observability;
+mod providers {
+    pub mod helius;
+    pub mod jupiter;
+}
 mod risk;
-mod scoring;
+mod strategy;
 mod types;
 
-use types::{AppState, AppSharedState};
+use config::Config;
+use execution::{ExecutionMode, Executor};
+use observability::init_logging;
+
+/// Solana momentum trading bot — paper-first.
+#[derive(Parser, Debug)]
+#[command(version, about)]
+struct Cli {
+    /// Validate configuration and exit (no secrets required).
+    #[arg(long)]
+    config_check: bool,
+
+    /// Force paper / dry-run mode (default).
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    paper: bool,
+
+    /// Enable live trading (requires EXECUTION_CONFIRMATION and wallet).
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+    live: bool,
+
+    /// Explicit risk confirmation string required for live mode.
+    #[arg(long)]
+    execution_confirmation: Option<String>,
+
+    /// Path to .env file.
+    #[arg(long, value_name = "FILE")]
+    env_file: Option<PathBuf>,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    dotenvy::dotenv().ok();
+    let cli = Cli::parse();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,pump_runner_bot=debug".parse().unwrap()),
-        )
-        .with_target(false)
-        .init();
+    match &cli.env_file {
+        Some(p) => dotenvy::from_path(p).ok(),
+        None => dotenvy::dotenv().ok(),
+    }
+    .ok();
 
-    let live = std::env::var("ENABLE_LIVE_TRADING").unwrap_or_default() == "true";
-    info!("pump_runner_bot v0.3.0 starting");
-    info!(
-        "Features: real volume | RugShield | CircuitBreaker | Jito | Watchlist cleanup | Trade log"
-    );
-    info!(
-        "Live trading: {}",
-        if live { "ENABLED" } else { "DISABLED (dry-run)" }
-    );
+    init_logging();
 
-    let state: AppSharedState = Arc::new(AppState::new(live));
+    let cfg = Config::from_env().context("Failed to load configuration")?;
 
-    let state_ws = state.clone();
-    let ws_handle = tokio::spawn(async move {
-        if let Err(e) = helius::listen_graduations(state_ws).await {
-            error!("WebSocket fatal: {:?}", e);
+    if cli.config_check {
+        info!("Configuration check complete.");
+        cfg.print_summary();
+        if !cfg.has_all_secrets() {
+            warn!("Optional secrets missing — providers will remain dormant.");
         }
-    });
+        return Ok(());
+    }
 
-    let state_scan = state.clone();
-    let scan_handle = tokio::spawn(async move {
-        if let Err(e) = helius::scan_volume_and_score(state_scan).await {
-            error!("Scanner fatal: {:?}", e);
+    if cli.live {
+        let confirmation = cli.execution_confirmation.clone().unwrap_or_default();
+        if !cfg.live_trading_enabled || confirmation != "I_UNDERSTAND_THE_RISK" {
+            error!(
+                "Live trading requires ENABLE_LIVE_TRADING=true AND \
+                 --execution-confirmation 'I_UNDERSTAND_THE_RISK'"
+            );
+            return Err(anyhow::anyhow!("Live trading confirmation missing"));
         }
-    });
+        if cfg.wallet_private_key.is_empty() {
+            error!("Live trading requires SOLANA_WALLET_PRIVATE_KEY.");
+            return Err(anyhow::anyhow!("Wallet private key missing"));
+        }
+        info!("⚠️ LIVE trading enabled. Trades are irreversible.");
+    }
 
-    info!("Bot running. Ctrl+C to stop.");
+    let mode = if cli.live {
+        ExecutionMode::Live
+    } else {
+        ExecutionMode::Paper
+    };
 
-    signal::ctrl_c().await?;
-    info!("Shutdown signal received");
+    info!("Starting bot in {:?} mode", mode);
+    let _executor: Box<dyn execution::Executor> =
+        execution::build_executor(mode, &cfg).await?;
 
-    ws_handle.abort();
-    scan_handle.abort();
-
-    info!(
-        "Final daily PnL: {:.4} SOL | Open positions: {}",
-        state.risk.daily_pnl(),
-        state.risk.open_positions.lock().len()
-    );
-    info!("pump_runner_bot stopped");
+    info!("Press Ctrl+C to stop.");
+    tokio::signal::ctrl_c().await.context("ctrl_c")?;
+    info!("Shutting down.");
     Ok(())
 }

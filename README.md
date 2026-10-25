@@ -1,81 +1,84 @@
-# solana-memecoin-sniper
+# solana-trading-bot
 
-Ultra-fast Solana Memecoin Sniper Bot for Pump.fun Trading - Rust, Anchor, Devnet Ready
+> ⚠️ **Warning:** Alle Trades können Totalverlust bedeuten. Teste zuerst im Paper-Trading.
 
-## Features
+Ein Rust-basierter Solana Momentum-Trading-Bot (v0.3.0). Standardmäßig **Paper / Dry-Run** — es werden **keine echten Transaktionen** gesendet. Live-Trading ist explizit und nur mit Doppelbestätigung aktivierbar.
 
-- Ultra-fast execution via Yellowstone gRPC and Triton One RPC
-- Pump.fun token sniping - detects new token launches in real-time
-- Rust-powered - zero-cost abstractions, maximum performance
-- Anchor integration - type-safe Solana program interactions
-- Token-2022 support - handles extended mint accounts and ATA detection
-- Auto TP/SL - configurable Take-Profit and Stop-Loss
-- Devnet ready - test safely before going live
-- GitHub Codespaces - one-click cloud dev environment
+## Architektur
 
-## Prerequisites
+- **Datenquelle:** Helius RPC + WebSocket (Pump.fun / PumpSwap Graduationen)
+- **Routing:** Jupiter (Quote-API), ggf. Metis
+- **Strategie:** Pluggable `Strategy`-Trait; neutrale Beispielstrategie
+- **Risiko:** harte Limits (Tagesverlust, Max-Trade, offene Positionen, Slippage)
+- **Ausführung:** `PaperExecutor` (Standard) / `LiveExecutor` (nur bei voller Bestätigung)
+- **Sicherheit:** Private Keys nie im Repo/Logs, `ENABLE_LIVE_TRADING=false` Standard
 
-- Rust >= 1.75
-- Solana CLI >= 1.18
-- Anchor >= 0.30
-- A Solana wallet with SOL
+## Codespace starten
 
-## Installation
+1. GitHub → Code → Codespaces → *New codespace* → Branch `kilo/celestial-lantern-crt`.
+2. Devcontainer-Setup startet automatisch (`scripts/bootstrap.sh`).
 
-Clone the repository:
-git clone https://github.com/Timson100x/solana-memecoin-sniper.git
-cd solana-memecoin-sniper
+## Codespace Secrets anlegen (GitHub)
 
-Build:
-cargo build --release
+In GitHub Repo → Settings → Codespaces → Secrets:
 
-Copy config:
+- `HELIUS_API_KEY`
+- `HELIUS_RPC_URL`
+- `HELIUS_WS_URL`
+- `JUPITER_API_KEY` (optional)
+- `SOLANA_WALLET_PRIVATE_KEY` (nur für Live-Trading; niemals committen!)
+- `TELEGRAM_BOT_TOKEN` (optional)
+- `TELEGRAM_CHAT_ID` (optional)
+
+> Ohne Secrets baut und testet der Bot weiterhin (Paper-Modus).
+
+## Lokale .env (nur Entwicklung)
+
+```bash
 cp .env.example .env
+# Werte anpassen (niemals ins Repo pushen)
+```
 
-## Configuration
+## Setup prüfen
 
-Edit .env with your settings:
-- RPC_URL: your RPC endpoint
-- WSS_URL: your WebSocket endpoint  
-- PRIVATE_KEY: your base58 private key
-- BUY_AMOUNT_SOL: e.g. 0.1
-- TAKE_PROFIT_PCT: e.g. 50
-- STOP_LOSS_PCT: e.g. 20
-- SLIPPAGE_BPS: e.g. 300
+```bash
+bash scripts/verify.sh
+```
 
-## Run on Devnet
+Führt aus: `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test`, `cargo run -- --config-check`.
 
-cargo run --release -- --network devnet
+## Paper-Trading starten
 
-## Run on Mainnet
+```bash
+cargo run -- --paper
+```
 
-cargo run --release -- --network mainnet
+Standardmäßig `ENABLE_LIVE_TRADING=false` → *keine* Transaktionen werden signiert oder gesendet.
 
-## GitHub Codespaces
+## Live-Trading starten (nur erfahren!)
 
-1. Click Code -> Codespaces -> Create codespace on main
-2. Wait for the environment (~2 min)
-3. Run cargo build --release
-4. Configure .env and start
+```bash
+# Setze in .env:
+# ENABLE_LIVE_TRADING=true
+# SOLANA_WALLET_PRIVATE_KEY=<base58-key>
 
-## Project Structure
+cargo run -- --live --execution-confirmation "I_UNDERSTAND_THE_RISK"
+```
 
-solana-memecoin-sniper/
-├── .devcontainer/        Codespaces config
-├── .github/workflows/    CI/CD pipelines
-├── src/
-│   ├── main.rs           Entry point
-│   ├── sniper.rs         Core sniper logic
-│   └── ts/
-│       └── token-utils.ts  Token-2022 ATA helpers
-├── Cargo.toml
-└── .env.example
+Ohne beide Sicherheitsbedingungen schlägt `--live` fehl.
 
-## Disclaimer
+## Variablen
 
-This bot is for educational purposes only. Trading cryptocurrencies carries significant financial risk. Always test on Devnet first.
+| Variable | Erforderlich | Bedeutung |
+|---|---|---|
+| `HELIUS_API_KEY` | nein | Helius API |
+| `HELIUS_RPC_URL` | nein | Mainnet RPC |
+| `HELIUS_WS_URL` | nein | WebSocket |
+| `JUPITER_API_URL` | nein | Jupiter Quote-Endpoint |
+| `SOLANA_WALLET_PRIVATE_KEY` | nur Live | Wallet (base58) |
+| `ENABLE_LIVE_TRADING` | nein | Standard `false` |
+| `EXECUTION_CONFIRMATION` | nur Live | bestätigen |
 
-## Built By
+## Verantwortungshaftung
 
-Foxy Vega / Timson100x - https://github.com/Timson100x
-Part of the $FOXY ecosystem - AI-powered cyberpunk memecoin on Solana.
+Cryptowährungen sind risikoreich. Der Bot ist Bildungszwecken gewidmet — stets Devnet/Test zuerst.

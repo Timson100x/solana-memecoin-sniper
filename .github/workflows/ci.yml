@@ -1,21 +1,28 @@
-name: Rust CI
+name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [main, "**/main"]
   pull_request:
-    branches: [ main ]
 
 jobs:
-  build-and-test:
+  build:
+    name: Check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: stable
-          override: true
-      - name: Build
-        run: cargo build --verbose
-      - name: Test
-        run: cargo test --verbose
+          components: clippy, rustfmt
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config libssl-dev clang cmake protobuf-compiler
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Cargo fmt check
+        run: cargo fmt --check
+      - name: Cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Cargo test
+        run: cargo test --all-features
+      - name: Config check
+        run: cargo run -- --config-check
