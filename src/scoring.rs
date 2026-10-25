@@ -6,7 +6,7 @@ pub fn calculate_score(
     buy_ratio: f64,
     age_hours: f64,
 ) -> f64 {
-    let mut score = 0.0;
+    let mut score: f64 = 0.0;
 
     if volume_5m_sol > 120.0 {
         score += 35.0;
