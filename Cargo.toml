@@ -48,4 +48,3 @@ production = ["solana"]
 
 [dev-dependencies]
 tokio = { version = "1.38", features = ["rt", "macros"] }
-mockall = "1.0"
